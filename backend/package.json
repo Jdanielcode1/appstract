@@ -1,0 +1,22 @@
+{
+  "name": "convex-pulse",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy",
+    "typecheck": "tsc -p convex --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "convex": "^1.46.0",
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^26.6.4",
+    "convex-test": "^0.0.61",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

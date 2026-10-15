@@ -1,0 +1,22 @@
+.DS_Store
+xcuserdata/
+DerivedData/
+build/
+node_modules/
+.env.local
+.env*.local
+.convex/
+Config/Local.xcconfig
+
+# Secrets and signing material (never commit)
+.env
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.pem
+
+# Local tool settings
+.claude/settings.local.json
+.vscode/
+.idea/

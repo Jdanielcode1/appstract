@@ -1,0 +1,4 @@
+// Copy to Config/Local.xcconfig (gitignored) and fill in your own values.
+// Your team ID: Xcode → Settings → Accounts, or developer.apple.com → Membership.
+DEVELOPMENT_TEAM = ABCDE12345
+BUNDLE_ID_PREFIX = com.yourname
