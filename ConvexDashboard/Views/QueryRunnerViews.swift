@@ -315,6 +315,11 @@ struct SavedQueryRunView: View {
                             .foregroundStyle(Color.convexSecondaryText)
                             .lineLimit(6)
                     }
+                    if let ranAt = viewModel.ranAt {
+                        Text("Updated \(Text(ranAt, style: .relative)) ago")
+                            .font(.convexMono(.caption2))
+                            .foregroundStyle(Color.convexSecondaryText)
+                    }
                 }
                 .padding(.vertical, 4)
                 if query.question != nil {
@@ -353,10 +358,15 @@ struct SavedQueryRunView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await viewModel.run() }
         .task { if viewModel.result == nil { await viewModel.run() } }
+        .sensoryFeedback(.success, trigger: viewModel.ranAt)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button("Run again", systemImage: "arrow.clockwise", action: rerun)
-                    .disabled(viewModel.isRunning)
+                // The old answer stays up while it reruns, so the button itself shows progress.
+                if viewModel.isRunning {
+                    ProgressView()
+                } else {
+                    Button("Run again", systemImage: "arrow.clockwise", action: rerun)
+                }
                 Menu("More", systemImage: "ellipsis.circle") {
                     NavigationLink {
                         QueryRunnerView(deploymentName: query.deploymentName, context: context, editing: query)
