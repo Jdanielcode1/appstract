@@ -167,9 +167,18 @@ struct DeploymentDetailView: View {
         }
     }
 
-    /// Official Convex insights (read limits, write conflicts) — no monitoring backend needed.
+    /// Official Convex insights (read limits, write conflicts) and live logs — no monitoring backend needed.
     private var healthSection: some View {
         ConvexSection("Health") {
+            if let urlString = deployment.deploymentUrl, let url = URL(string: urlString) {
+                NavigationLink {
+                    LiveLogsView(deploymentURL: url, client: client)
+                } label: {
+                    SettingsRow("Live Logs", systemImage: "dot.radiowaves.left.and.right", tint: .convexGreen) {
+                        Text("Calls & errors")
+                    }
+                }
+            }
             NavigationLink {
                 InsightsView(deployment: deployment, client: client)
             } label: {

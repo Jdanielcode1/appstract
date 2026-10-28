@@ -63,12 +63,16 @@ export const deployments = query({
       /** Log lines / errors not stored today because the daily quota was reached. */
       logsDroppedToday: v.number(),
       errorsDroppedToday: v.number(),
+      /** "lite": numbers pulled every few minutes (no latency, error messages or logs). "full": log stream. */
+      mode: v.union(v.literal("lite"), v.literal("full")),
     }),
   ),
   handler: async (ctx, { appKey }) => {
     assertAppKey(appKey);
     const today = startOfUtcDay(Date.now());
     const rows = await ctx.db.query("deployments").take(100);
+    const streamed = new Set((await ctx.db.query("streams").take(500)).map((stream) => stream.deploymentName));
+    const lite = new Set((await ctx.db.query("liteTargets").take(100)).map((target) => target.deploymentName));
     return rows
       .sort((a, b) => b.lastEventAt - a.lastEventAt)
       .map((d) => ({
@@ -81,6 +85,7 @@ export const deployments = query({
         schedulerRunningJobs: d.schedulerRunningJobs,
         logsDroppedToday: d.quotaDayStart === today ? (d.logsDroppedToday ?? 0) : 0,
         errorsDroppedToday: d.quotaDayStart === today ? (d.errorsDroppedToday ?? 0) : 0,
+        mode: lite.has(d.name) && !streamed.has(d.name) ? ("lite" as const) : ("full" as const),
       }));
   },
 });

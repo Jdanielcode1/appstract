@@ -1,8 +1,8 @@
 import { v } from "convex/values";
 import { evaluateIngest } from "./alerts";
-import { internalMutation } from "./_generated/server";
+import { internalMutation, type MutationCtx } from "./_generated/server";
 import { dailyQuotas, startOfUtcDay } from "./lib/config";
-import { mergeHistograms } from "./lib/events";
+import { mergeHistograms, type StatDelta, type TotalDelta } from "./lib/events";
 import { granularity, totalGranularity } from "./schema";
 
 const deploymentUpdate = v.object({
@@ -16,7 +16,7 @@ const deploymentUpdate = v.object({
   schedulerStatsAt: v.optional(v.number()),
 });
 
-const statDelta = v.object({
+export const statDelta = v.object({
   deploymentName: v.string(),
   granularity,
   bucketStart: v.number(),
@@ -35,7 +35,7 @@ const statDelta = v.object({
   egressBytes: v.number(),
 });
 
-const totalDelta = v.object({
+export const totalDelta = v.object({
   deploymentName: v.string(),
   granularity: totalGranularity,
   bucketStart: v.number(),
@@ -159,60 +159,7 @@ export const ingestBatch = internalMutation({
       if (Object.keys(patch).length > 0) await ctx.db.patch(existing._id, patch);
     }
 
-    for (const delta of args.stats) {
-      const existing = await ctx.db
-        .query("functionStats")
-        .withIndex("by_key", (q) =>
-          q
-            .eq("deploymentName", delta.deploymentName)
-            .eq("granularity", delta.granularity)
-            .eq("path", delta.path)
-            .eq("bucketStart", delta.bucketStart),
-        )
-        .unique();
-      if (!existing) {
-        await ctx.db.insert("functionStats", { ...delta, hasErrors: delta.errors > 0 });
-        continue;
-      }
-      await ctx.db.patch(existing._id, {
-        calls: existing.calls + delta.calls,
-        errors: existing.errors + delta.errors,
-        hasErrors: existing.errors + delta.errors > 0,
-        cachedCalls: existing.cachedCalls + delta.cachedCalls,
-        totalMs: existing.totalMs + delta.totalMs,
-        maxMs: Math.max(existing.maxMs, delta.maxMs),
-        latencyHistogram: mergeHistograms(existing.latencyHistogram, delta.latencyHistogram),
-        dbReadBytes: existing.dbReadBytes + delta.dbReadBytes,
-        dbWriteBytes: existing.dbWriteBytes + delta.dbWriteBytes,
-        docsRead: existing.docsRead + delta.docsRead,
-        docsWritten: existing.docsWritten + delta.docsWritten,
-        egressBytes: existing.egressBytes + delta.egressBytes,
-      });
-    }
-
-    for (const delta of args.totals) {
-      const existing = await ctx.db
-        .query("deploymentStats")
-        .withIndex("by_deploymentName_granularity_bucketStart", (q) =>
-          q
-            .eq("deploymentName", delta.deploymentName)
-            .eq("granularity", delta.granularity)
-            .eq("bucketStart", delta.bucketStart),
-        )
-        .unique();
-      if (!existing) {
-        await ctx.db.insert("deploymentStats", delta);
-        continue;
-      }
-      await ctx.db.patch(existing._id, {
-        calls: existing.calls + delta.calls,
-        errors: existing.errors + delta.errors,
-        cachedCalls: existing.cachedCalls + delta.cachedCalls,
-        totalMs: existing.totalMs + delta.totalMs,
-        maxMs: Math.max(existing.maxMs, delta.maxMs),
-        latencyHistogram: mergeHistograms(existing.latencyHistogram, delta.latencyHistogram),
-      });
-    }
+    await applyStats(ctx, args.stats, args.totals);
 
     const take = (allowance: Map<string, number>, deploymentName: string) => {
       const left = allowance.get(deploymentName) ?? 0;
@@ -233,3 +180,64 @@ export const ingestBatch = internalMutation({
     return null;
   },
 });
+
+/**
+ * Adds stat deltas to functionStats / deploymentStats rows (creating missing ones). Shared by
+ * log stream batches and Lite polls (lite.ts).
+ */
+export async function applyStats(ctx: MutationCtx, stats: StatDelta[], totals: TotalDelta[]) {
+  for (const delta of stats) {
+    const existing = await ctx.db
+      .query("functionStats")
+      .withIndex("by_key", (q) =>
+        q
+          .eq("deploymentName", delta.deploymentName)
+          .eq("granularity", delta.granularity)
+          .eq("path", delta.path)
+          .eq("bucketStart", delta.bucketStart),
+      )
+      .unique();
+    if (!existing) {
+      await ctx.db.insert("functionStats", { ...delta, hasErrors: delta.errors > 0 });
+      continue;
+    }
+    await ctx.db.patch(existing._id, {
+      calls: existing.calls + delta.calls,
+      errors: existing.errors + delta.errors,
+      hasErrors: existing.errors + delta.errors > 0,
+      cachedCalls: existing.cachedCalls + delta.cachedCalls,
+      totalMs: existing.totalMs + delta.totalMs,
+      maxMs: Math.max(existing.maxMs, delta.maxMs),
+      latencyHistogram: mergeHistograms(existing.latencyHistogram, delta.latencyHistogram),
+      dbReadBytes: existing.dbReadBytes + delta.dbReadBytes,
+      dbWriteBytes: existing.dbWriteBytes + delta.dbWriteBytes,
+      docsRead: existing.docsRead + delta.docsRead,
+      docsWritten: existing.docsWritten + delta.docsWritten,
+      egressBytes: existing.egressBytes + delta.egressBytes,
+    });
+  }
+
+  for (const delta of totals) {
+    const existing = await ctx.db
+      .query("deploymentStats")
+      .withIndex("by_deploymentName_granularity_bucketStart", (q) =>
+        q
+          .eq("deploymentName", delta.deploymentName)
+          .eq("granularity", delta.granularity)
+          .eq("bucketStart", delta.bucketStart),
+      )
+      .unique();
+    if (!existing) {
+      await ctx.db.insert("deploymentStats", delta);
+      continue;
+    }
+    await ctx.db.patch(existing._id, {
+      calls: existing.calls + delta.calls,
+      errors: existing.errors + delta.errors,
+      cachedCalls: existing.cachedCalls + delta.cachedCalls,
+      totalMs: existing.totalMs + delta.totalMs,
+      maxMs: Math.max(existing.maxMs, delta.maxMs),
+      latencyHistogram: mergeHistograms(existing.latencyHistogram, delta.latencyHistogram),
+    });
+  }
+}

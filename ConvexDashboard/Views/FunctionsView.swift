@@ -5,9 +5,12 @@ import SwiftUI
 struct FunctionsView: View {
     @State private var viewModel: FunctionsViewModel
     private let source: any MonitoringSource
+    /// False on 5-minute checks (no log stream): counts only, no latency, usage or error messages.
+    private let hasDetails: Bool
 
-    init(deploymentName: String, source: any MonitoringSource) {
+    init(deploymentName: String, source: any MonitoringSource, hasDetails: Bool = true) {
         self.source = source
+        self.hasDetails = hasDetails
         _viewModel = State(initialValue: FunctionsViewModel(deploymentName: deploymentName, source: source))
     }
 
@@ -44,20 +47,24 @@ struct FunctionsView: View {
                     }
                 } footer: {
                     if let updated = viewModel.lastUpdated {
-                        Text("Updated \(updated, format: .relative(presentation: .named)) · refreshes every 15s")
+                        Text(hasDetails
+                             ? "Updated \(updated.formatted(.relative(presentation: .named))) · refreshes every 15s"
+                             : "Counts update every 5 minutes, up to a few minutes behind. Turn on instant errors for latency and error details.")
                     }
                 }
 
                 ConvexSection {
                     Picker("Sort", selection: $viewModel.sort) {
-                        ForEach(FunctionsViewModel.Sort.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(FunctionsViewModel.Sort.allCases.filter { hasDetails || $0 != .slowest }) {
+                            Text($0.rawValue).tag($0)
+                        }
                     }
                     ForEach(viewModel.functions) { stat in
                         NavigationLink {
-                            FunctionDetailView(stat: stat, window: viewModel.window,
-                                               deploymentName: viewModel.deploymentName, source: source)
+                            FunctionDetailView(stat: stat, window: viewModel.window, deploymentName: viewModel.deploymentName,
+                                               source: source, hasDetails: hasDetails)
                         } label: {
-                            FunctionRow(stat: stat)
+                            FunctionRow(stat: stat, showsLatency: hasDetails)
                         }
                     }
                 } header: {
@@ -80,11 +87,13 @@ struct FunctionsView: View {
         .navigationTitle("Functions")
         .searchable(text: $viewModel.searchText, prompt: "Filter functions")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    RecentErrorsView(deploymentName: viewModel.deploymentName, source: source)
-                } label: {
-                    Label("Errors", systemImage: "exclamationmark.octagon")
+            if hasDetails {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        RecentErrorsView(deploymentName: viewModel.deploymentName, source: source)
+                    } label: {
+                        Label("Errors", systemImage: "exclamationmark.octagon")
+                    }
                 }
             }
         }
@@ -96,6 +105,7 @@ struct FunctionsView: View {
 
 private struct FunctionRow: View {
     let stat: FunctionStat
+    let showsLatency: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -108,7 +118,9 @@ private struct FunctionRow: View {
             }
             HStack(spacing: 12) {
                 Label(MetricFormat.count(stat.calls), systemImage: "arrow.triangle.2.circlepath")
-                Label("p95 \(MetricFormat.duration(stat.p95Ms))", systemImage: "timer")
+                if showsLatency {
+                    Label("p95 \(MetricFormat.duration(stat.p95Ms))", systemImage: "timer")
+                }
                 if stat.errors > 0 {
                     Label(MetricFormat.percent(stat.errorRate), systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(Color.convexRed)

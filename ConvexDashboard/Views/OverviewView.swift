@@ -202,7 +202,10 @@ private struct DeploymentCardRow: View {
                 }
                 if let health = card.health {
                     metric("24h errors", MetricFormat.percent(health.errorRate), tint: health.errors > 0 ? .convexRed : nil)
-                    metric("p95", MetricFormat.duration(health.p95Ms))
+                    // Lite monitoring has no latency (0).
+                    if health.p95Ms > 0 {
+                        metric("p95", MetricFormat.duration(health.p95Ms))
+                    }
                 }
             }
 

@@ -167,73 +167,81 @@ export async function evaluateIngest(ctx: MutationCtx, errors: ErrorEntry[], log
 
 // MARK: - Periodic evaluation (errorRate, schedulerLag)
 
+/**
+ * Runs every few minutes: from the `monitor` cron when no deployment uses Lite, else right after
+ * each Lite poll is recorded (lite.ts), so pulled numbers are fresh.
+ */
+export async function evaluateThresholds(ctx: MutationCtx) {
+  const rules = (await ctx.db.query("alertRules").take(200)).filter(
+    (rule) => rule.enabled && (rule.kind === "errorRate" || rule.kind === "schedulerLag"),
+  );
+  if (rules.length === 0) return;
+
+  const now = Date.now();
+  const deployments = await ctx.db.query("deployments").take(100);
+
+  for (const rule of rules) {
+    for (const deployment of deployments) {
+      if (!ruleAppliesTo(rule, deployment.name)) continue;
+
+      if (rule.kind === "errorRate") {
+        const windowMinutes = rule.windowMinutes ?? 5;
+        const since = now - windowMinutes * MINUTE_MS;
+        const totals = await ctx.db
+          .query("deploymentStats")
+          .withIndex("by_deploymentName_granularity_bucketStart", (q) =>
+            q.eq("deploymentName", deployment.name).eq("granularity", "minute").gte("bucketStart", since),
+          )
+          .take(windowMinutes + 2);
+        const calls = totals.reduce((sum, row) => sum + row.calls, 0);
+        const errors = totals.reduce((sum, row) => sum + row.errors, 0);
+        const threshold = rule.threshold ?? 0.05;
+        if (calls < (rule.minCalls ?? 20) || errors / calls < threshold) continue;
+        if (await inCooldown(ctx, rule, deployment.name, now)) continue;
+
+        // Only the minute rows that had errors, to name the worst function.
+        const failing = await ctx.db
+          .query("functionStats")
+          .withIndex("by_deploymentName_granularity_hasErrors_bucketStart", (q) =>
+            q
+              .eq("deploymentName", deployment.name)
+              .eq("granularity", "minute")
+              .eq("hasErrors", true)
+              .gte("bucketStart", since),
+          )
+          .take(1_000);
+        const errorsByPath = new Map<string, number>();
+        for (const row of failing) errorsByPath.set(row.path, (errorsByPath.get(row.path) ?? 0) + row.errors);
+        const [worstPath, worstErrors] = [...errorsByPath.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
+        const worst = worstPath ? { path: worstPath, errors: worstErrors } : undefined;
+        await fire(ctx, {
+          rule,
+          deploymentName: deployment.name,
+          title: `Error rate ${Math.round((errors / calls) * 100)}% · ${deploymentLabel(deployment, deployment.name)}`,
+          body: `${errors} of ${calls} calls failed in the last ${windowMinutes} min${worst?.errors ? `. Most from ${worst.path}` : ""}.`,
+          path: worst?.errors ? worst.path : undefined,
+        });
+      } else {
+        const lag = deployment.schedulerLagSeconds ?? 0;
+        const fresh = (deployment.schedulerStatsAt ?? 0) > now - 5 * MINUTE_MS;
+        if (!fresh || lag < (rule.lagSeconds ?? 60)) continue;
+        if (await inCooldown(ctx, rule, deployment.name, now)) continue;
+        await fire(ctx, {
+          rule,
+          deploymentName: deployment.name,
+          title: `Scheduler behind · ${deploymentLabel(deployment, deployment.name)}`,
+          body: `Scheduled jobs are ${Math.round(lag)}s behind (${deployment.schedulerRunningJobs ?? 0} running).`,
+        });
+      }
+    }
+  }
+}
+
 export const checkThresholds = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    const rules = (await ctx.db.query("alertRules").take(200)).filter(
-      (rule) => rule.enabled && (rule.kind === "errorRate" || rule.kind === "schedulerLag"),
-    );
-    if (rules.length === 0) return null;
-
-    const now = Date.now();
-    const deployments = await ctx.db.query("deployments").take(100);
-
-    for (const rule of rules) {
-      for (const deployment of deployments) {
-        if (!ruleAppliesTo(rule, deployment.name)) continue;
-
-        if (rule.kind === "errorRate") {
-          const windowMinutes = rule.windowMinutes ?? 5;
-          const since = now - windowMinutes * MINUTE_MS;
-          const totals = await ctx.db
-            .query("deploymentStats")
-            .withIndex("by_deploymentName_granularity_bucketStart", (q) =>
-              q.eq("deploymentName", deployment.name).eq("granularity", "minute").gte("bucketStart", since),
-            )
-            .take(windowMinutes + 2);
-          const calls = totals.reduce((sum, row) => sum + row.calls, 0);
-          const errors = totals.reduce((sum, row) => sum + row.errors, 0);
-          const threshold = rule.threshold ?? 0.05;
-          if (calls < (rule.minCalls ?? 20) || errors / calls < threshold) continue;
-          if (await inCooldown(ctx, rule, deployment.name, now)) continue;
-
-          // Only the minute rows that had errors, to name the worst function.
-          const failing = await ctx.db
-            .query("functionStats")
-            .withIndex("by_deploymentName_granularity_hasErrors_bucketStart", (q) =>
-              q
-                .eq("deploymentName", deployment.name)
-                .eq("granularity", "minute")
-                .eq("hasErrors", true)
-                .gte("bucketStart", since),
-            )
-            .take(1_000);
-          const errorsByPath = new Map<string, number>();
-          for (const row of failing) errorsByPath.set(row.path, (errorsByPath.get(row.path) ?? 0) + row.errors);
-          const [worstPath, worstErrors] = [...errorsByPath.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
-          const worst = worstPath ? { path: worstPath, errors: worstErrors } : undefined;
-          await fire(ctx, {
-            rule,
-            deploymentName: deployment.name,
-            title: `Error rate ${Math.round((errors / calls) * 100)}% · ${deploymentLabel(deployment, deployment.name)}`,
-            body: `${errors} of ${calls} calls failed in the last ${windowMinutes} min${worst?.errors ? `. Most from ${worst.path}` : ""}.`,
-            path: worst?.errors ? worst.path : undefined,
-          });
-        } else {
-          const lag = deployment.schedulerLagSeconds ?? 0;
-          const fresh = (deployment.schedulerStatsAt ?? 0) > now - 5 * MINUTE_MS;
-          if (!fresh || lag < (rule.lagSeconds ?? 60)) continue;
-          if (await inCooldown(ctx, rule, deployment.name, now)) continue;
-          await fire(ctx, {
-            rule,
-            deploymentName: deployment.name,
-            title: `Scheduler behind · ${deploymentLabel(deployment, deployment.name)}`,
-            body: `Scheduled jobs are ${Math.round(lag)}s behind (${deployment.schedulerRunningJobs ?? 0} running).`,
-          });
-        }
-      }
-    }
+    await evaluateThresholds(ctx);
     return null;
   },
 });

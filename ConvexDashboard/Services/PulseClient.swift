@@ -58,6 +58,46 @@ struct PulseClient: Sendable {
         ])
     }
 
+    // MARK: Lite monitoring (backend/convex/lite.ts)
+
+    struct LiteTarget: Decodable, Sendable {
+        let deploymentName: String
+        let createdAt: Double
+        let lastPolledAt: Double?
+        /// Why the last poll failed (e.g. the access token was rejected).
+        let lastError: String?
+    }
+
+    func liteTargets() async throws -> [LiteTarget] {
+        try await call(.query, "lite:list", args: [:])
+    }
+
+    /// The backend pulls this deployment's metrics every 5 minutes with `accessToken`.
+    func enableLite(deployment: Deployment, deploymentURL: URL, project: Project?, accessToken: String) async throws {
+        var args: [String: any Sendable] = [
+            "accessToken": accessToken,
+            "deploymentName": deployment.name,
+            "deploymentUrl": deploymentURL.absoluteString,
+            "deploymentType": deployment.deploymentType,
+        ]
+        if let project {
+            args["projectName"] = project.name
+            args["projectSlug"] = project.slug
+        }
+        do {
+            let _: EmptyValue = try await call(.mutation, "lite:enable", args: args)
+        } catch PulseError.function(let message) where message.contains("Could not find public function") || message.hasSuffix("Server Error") {
+            throw PulseError.function("Your monitoring backend needs an update for this. Redeploy it (cd backend && npx convex deploy).")
+        }
+    }
+
+    func disableLite(deploymentName: String, deleteData: Bool) async throws {
+        let _: EmptyValue = try await call(.mutation, "lite:disable", args: [
+            "deploymentName": deploymentName,
+            "deleteData": deleteData,
+        ])
+    }
+
     // MARK: Plumbing
 
     enum PulseError: LocalizedError {

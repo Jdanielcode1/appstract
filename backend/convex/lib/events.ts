@@ -426,7 +426,7 @@ export function deploySummary(metadata: string): string {
   return parts.length ? parts.join(" · ") : "Functions updated";
 }
 
-function emptyTotal(deploymentName: string, granularity: "minute" | "hour", bucketStart: number): TotalDelta {
+export function emptyTotal(deploymentName: string, granularity: "minute" | "hour", bucketStart: number): TotalDelta {
   return {
     deploymentName,
     granularity,
@@ -440,7 +440,7 @@ function emptyTotal(deploymentName: string, granularity: "minute" | "hour", buck
   };
 }
 
-function emptyStat(
+export function emptyStat(
   deploymentName: string,
   granularity: "minute" | "hour" | "day",
   bucketStart: number,

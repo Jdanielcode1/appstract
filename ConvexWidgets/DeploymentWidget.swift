@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import WidgetKit
 
@@ -12,7 +13,7 @@ struct ConvexWidgetsBundle: WidgetBundle {
     }
 }
 
-/// Calls today, errors in 24h, limit pressure, paused state, and last deploy for one deployment.
+/// Calls today with a calls chart, errors in 24h, limit pressure, paused state, and last deploy for one deployment.
 struct DeploymentWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "DeploymentWidget", intent: SelectDeploymentIntent.self, provider: DeploymentProvider()) { entry in
@@ -79,7 +80,7 @@ struct DeploymentWidgetView: View {
             case .accessoryRectangular: RectangularDeploymentView(snapshot: snapshot)
             case .accessoryCircular: CircularDeploymentView(snapshot: snapshot)
             case .accessoryInline: Text(WidgetText.inline(snapshot))
-            default: SmallDeploymentView(snapshot: snapshot)
+            default: SmallDeploymentView(snapshot: snapshot, showsChart: true)
             }
         } else {
             MessageView(message: entry.message ?? "No data", family: family)
@@ -105,6 +106,13 @@ enum WidgetText {
 
     static func percent(_ fraction: Double) -> String {
         fraction.formatted(.percent.precision(.fractionLength(0)))
+    }
+
+    /// Medium widget footer under the chart: month total and the closest usage limit.
+    static func chartFooter(_ snapshot: DeploymentSnapshot) -> String {
+        var parts = ["\(calls(snapshot.callsMonth)) this month"]
+        if let fraction = snapshot.limitFraction { parts.append("Limit \(percent(fraction))") }
+        return parts.joined(separator: " · ")
     }
 
     static func inline(_ snapshot: DeploymentSnapshot) -> String {
@@ -156,6 +164,8 @@ private struct PausedPill: View {
 
 private struct SmallDeploymentView: View {
     let snapshot: DeploymentSnapshot
+    /// The standalone small widget adds a sparkline; the medium one shows a full chart beside it.
+    var showsChart = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -172,6 +182,11 @@ private struct SmallDeploymentView: View {
                 Text("calls today")
                     .font(.convexMono(.caption2))
                     .foregroundStyle(Color.convexSecondaryText)
+                if showsChart, let chart = snapshot.callsChart {
+                    CallsChartView(chart: chart)
+                        .frame(height: 22)
+                        .padding(.top, 6)
+                }
             }
             Spacer(minLength: 4)
             Text(WidgetText.errors(snapshot))
@@ -189,26 +204,77 @@ private struct MediumDeploymentView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             SmallDeploymentView(snapshot: snapshot)
-            VStack(alignment: .leading, spacing: 8) {
-                StatLine(label: "This month", value: "\(WidgetText.calls(snapshot.callsMonth)) calls", tint: .convexText)
-                if let fraction = snapshot.limitFraction {
-                    VStack(alignment: .leading, spacing: 3) {
-                        StatLine(label: snapshot.limitName ?? "Usage limit", value: WidgetText.percent(fraction),
-                                 tint: fraction >= 0.8 ? .convexYellow : .convexText)
-                        ProgressView(value: min(fraction, 1))
-                            .tint(fraction >= 1 ? Color.convexRed : fraction >= 0.8 ? Color.convexYellow : Color.convexGreen)
+                .frame(maxWidth: 120)
+            if let chart = snapshot.callsChart {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(chart.label.uppercased())
+                            .font(.convexMono(.caption2, weight: .medium))
+                            .foregroundStyle(Color.convexSecondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(WidgetText.calls(chart.total))
+                            .font(.convexMono(.caption2, weight: .semibold))
+                            .foregroundStyle(Color.convexText)
                     }
-                } else {
-                    StatLine(label: "Usage limit", value: "None set", tint: .convexSecondaryText)
+                    CallsChartView(chart: chart)
+                        .frame(maxHeight: .infinity)
+                    Text(WidgetText.chartFooter(snapshot))
+                        .font(.convexMono(.caption2))
+                        .foregroundStyle((snapshot.limitFraction ?? 0) >= 0.8 ? Color.convexYellow : Color.convexSecondaryText)
+                        .lineLimit(1)
                 }
-                Spacer(minLength: 0)
-                Text(WidgetText.lastDeploy(snapshot))
-                    .font(.convexMono(.caption2))
-                    .foregroundStyle(Color.convexSecondaryText)
-                    .lineLimit(1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                UsageColumn(snapshot: snapshot)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+}
+
+/// Medium widget's right side when there's no chart data: month calls, usage limit, last deploy.
+private struct UsageColumn: View {
+    let snapshot: DeploymentSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            StatLine(label: "This month", value: "\(WidgetText.calls(snapshot.callsMonth)) calls", tint: .convexText)
+            if let fraction = snapshot.limitFraction {
+                VStack(alignment: .leading, spacing: 3) {
+                    StatLine(label: snapshot.limitName ?? "Usage limit", value: WidgetText.percent(fraction),
+                             tint: fraction >= 0.8 ? .convexYellow : .convexText)
+                    ProgressView(value: min(fraction, 1))
+                        .tint(fraction >= 1 ? Color.convexRed : fraction >= 0.8 ? Color.convexYellow : Color.convexGreen)
+                }
+            } else {
+                StatLine(label: "Usage limit", value: "None set", tint: .convexSecondaryText)
+            }
+            Spacer(minLength: 0)
+            Text(WidgetText.lastDeploy(snapshot))
+                .font(.convexMono(.caption2))
+                .foregroundStyle(Color.convexSecondaryText)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// Bars of function calls per bucket; errors (when known) stack in red at the top of each bar.
+private struct CallsChartView: View {
+    let chart: WidgetCallsChart
+
+    var body: some View {
+        Chart(Array(chart.bars.enumerated()), id: \.offset) { index, bar in
+            let errors = min(bar.errors ?? 0, bar.calls)
+            BarMark(x: .value("Time", index), y: .value("Calls", bar.calls - errors))
+                .foregroundStyle(Color.convexAccent)
+            BarMark(x: .value("Time", index), y: .value("Calls", errors))
+                .foregroundStyle(Color.convexRed)
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartLegend(.hidden)
+        .chartXScale(domain: -0.5...(Double(chart.bars.count) - 0.5))
     }
 }
 

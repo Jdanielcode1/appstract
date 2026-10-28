@@ -47,6 +47,32 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_deployment", ["deploymentName"]),
 
+  /**
+   * Lite monitoring (lite.ts): deployments whose metrics the backend pulls every few minutes
+   * instead of receiving a log stream. Skipped while the deployment also has a stream.
+   */
+  liteTargets: defineTable({
+    deploymentName: v.string(),
+    deploymentUrl: v.string(),
+    deploymentType: v.optional(v.string()),
+    projectName: v.optional(v.string()),
+    projectSlug: v.optional(v.string()),
+    createdAt: v.number(),
+    /** Every minute before this has been recorded (exactly once). */
+    polledThrough: v.optional(v.number()),
+    lastPolledAt: v.optional(v.number()),
+    /** Why the last poll failed, shown in the app. Cleared by a successful poll. */
+    lastError: v.optional(v.string()),
+    /** Function path → type ("query", …), from the deployment's function spec. */
+    functionTypes: v.optional(v.array(v.object({ path: v.string(), type: v.string() }))),
+  }).index("by_deployment", ["deploymentName"]),
+
+  /**
+   * Backend-wide secrets the app hands over, e.g. the Convex access token Lite polls with. Never
+   * returned to clients.
+   */
+  secrets: defineTable({ name: v.string(), value: v.string(), updatedAt: v.number() }).index("by_name", ["name"]),
+
   alertRules: defineTable({ ...alertRuleFields, createdAt: v.number() }),
 
   /** Fired alerts (history shown in the app). Kept 30 days. */

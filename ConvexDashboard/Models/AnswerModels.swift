@@ -71,14 +71,30 @@ enum AnswerPresentation {
                 return
             }
             let label = Self.labelField(display?.label, in: objects)
-            if display?.type != .list, let metric = Self.metricField(display?.value, in: objects, sortedHint: display?.type == .ranking) {
+            // Two-field rows ({status, count}) are counts per group: always bars, sorted here.
+            let isGroupCount = objects.allSatisfy { $0.keys.filter { !$0.hasPrefix("_") }.count == 2 }
+            if display?.type != .list || isGroupCount,
+               let metric = Self.metricField(display?.value, in: objects, sortedHint: display?.type == .ranking || isGroupCount) {
                 self = .ranking(rows: Self.rankRows(objects, label: label, metric: metric), metric: metric, unit: display?.unit)
             } else {
                 self = .list(rows: Self.listRows(objects, label: label))
             }
         case .object(let object):
+            // Models often wrap rows with metadata ({rows: [...], scanned: 160, sampleItem: {...}});
+            // show the rows when they're the only list in the object.
+            let lists = object.values.filter { if case .array(let items) = $0, !items.isEmpty { true } else { false } }
+            if lists.count == 1, let rows = lists.first {
+                self = AnswerPresentation(value: rows, display: display)
+                return
+            }
             // A single number in a one-field object reads better as a number.
             let numbers = object.filter { if case .number = $0.value { true } else { false } }
+            // Counts keyed by name ({delivered: 845, shipped: 611}) read as a ranking.
+            if numbers.count >= 2, numbers.count == object.count, display?.type != .number, display?.type != .text {
+                let rows = numbers.map { ["name": JSONValue.string($0.key), "value": $0.value] }
+                self = .ranking(rows: Self.rankRows(rows, label: "name", metric: "value"), metric: display?.value ?? "value", unit: display?.unit)
+                return
+            }
             if object.count == 1, let (_, only) = numbers.first, case .number(let number) = only {
                 self = .number(text: Self.format(number), unit: display?.unit)
             } else {

@@ -23,15 +23,15 @@ flowchart LR
     end
 
     KC -.-> App
-    App -- "token: projects, usage,<br/>data, read-only queries" --> API
+    App -- "token: projects, usage, data,<br/>read-only queries, live logs" --> API
     API --- Apps
-    Apps -- "log stream<br/>(webhook)" --> BE
+    Apps -- "instant: log stream (Pro)<br/>or counts every 5 min" --> BE
     App -- "APP_KEY: stats,<br/>alerts, AI chat" --> BE
     BE -- "Claude Haiku" --> GW
 ```
 
-- **Without the backend**, the app talks straight to Convex with your access token.
-- **With the backend**, you also get monitoring, alerts and Ask AI. Your deployments send their logs to it, and it's the only piece that talks to the AI Gateway.
+- **Without the backend**, the app talks straight to Convex with your access token. That already includes Live Logs: recent calls, errors and `console.log` output as they happen, while the screen is open.
+- **With the backend**, you also get saved stats, alerts and Ask AI. It watches your deployments (see [How monitoring works](#how-monitoring-works)), and it's the only piece that talks to the AI Gateway.
 
 ## Features
 
@@ -40,8 +40,11 @@ flowchart LR
 | Projects, deployments, usage, limits, env vars, pause/unpause | Token |
 | Metrics charts, Insights, data browser, Run Query, schedules | Token |
 | Home Screen and Lock Screen widgets | Token |
-| Function stats, errors, logs | Backend + Convex Pro on the monitored app |
-| Alerts (new error, error rate, scheduler lag, deploys) | Backend |
+| Live Logs: calls, errors and console output as they happen | Token |
+| Function stats: calls and errors per function, charts | Backend (any Convex plan) |
+| Instant errors: error messages, latency, saved logs | Backend + Convex Pro on the monitored app |
+| Alerts: error rate, scheduler lag | Backend (any Convex plan) |
+| Alerts: new error, log match, deploys | Backend + Convex Pro on the monitored app |
 | Ask AI | Backend on a paid Convex plan |
 
 Safety: Face ID lock, read-only queries, and a confirmation before any write.
@@ -91,7 +94,7 @@ open ConvexDashboard.xcodeproj
 
 ### 2. Add the monitoring backend (optional, about 5 minutes)
 
-This adds function stats, error history, logs, alerts and Ask AI. It's a separate Convex project in **your** account. Your apps' code doesn't change.
+This adds function stats, alerts, saved errors and logs, and Ask AI. It's a separate Convex project in **your** account. Your apps' code doesn't change.
 
 ```bash
 cd backend
@@ -104,13 +107,53 @@ npx convex env get APP_KEY --prod   # copy this value
 
 Then in the app:
 1. Go to **Settings → Monitoring Backend**. Paste the production URL (`https://<name>.convex.cloud`) and the `APP_KEY`, then tap **Connect**.
-2. Open any deployment you want to watch and tap **Enable monitoring**. This needs **Convex Pro** on that app's team, because it uses [log streams](https://docs.convex.dev/production/integrations/log-streams/).
+2. Open any deployment you want to watch and turn on **Enable Monitoring**. It works on any Convex plan. On Convex Pro, errors arrive instantly (see [How monitoring works](#how-monitoring-works)).
 3. Go through the [precautions checklist](#precautions-checklist) below. It takes about 2 minutes.
 
 Ask AI also needs the backend's team to be on a paid Convex plan, because it uses the AI Gateway.
 
 
-## How the monitoring backend works
+## How monitoring works
+
+There's one switch: **Enable Monitoring** on a deployment. The app picks the best method that deployment allows.
+
+| | **Instant** (Convex Pro) | **Every 5 minutes** (any plan) |
+|---|---|---|
+| How | Convex sends every call, error and log line to your backend through a [log stream](https://docs.convex.dev/production/integrations/log-streams/) | Your backend asks Convex for each function's call and error counts every 5 minutes |
+| Errors show up | Within seconds | Within about 5 minutes |
+| You get | Calls, errors, latency, error messages, saved logs, every alert type | Calls and errors per function, error-rate and scheduler-lag alerts |
+| Backend usage | Grows with your app's traffic | Small and flat, however busy your app is |
+
+When you turn it on, the app:
+1. Sets up the 5-minute checks. This always works, and it's the fallback.
+2. Tries to add the log stream. If the deployment isn't on Convex Pro, Convex refuses it, and monitoring stays on the 5-minute checks. Nothing else to do.
+
+On a deployment using the checks, **Turn On Instant Errors** tries the log stream again (for example after upgrading to Pro). On a busy deployment, **Turn Off Instant Errors** goes back to the checks to save backend usage. Either way, **Live Logs** (deployment → Health) shows recent calls as they happen, straight from Convex, with no backend at all.
+
+### What it costs
+
+Monitoring runs on **your backend's** Convex account, so it uses that account's plan. These are rough numbers per monitored deployment per month, measured on real backends:
+
+| | **Every 5 minutes** | **Instant** |
+|---|---|---|
+| Function calls | ~35K/month **in total**, however many deployments | ~65K/month **each** when quiet, more when busy |
+| Database bandwidth | ~0.4–0.6 GB/month each | ~0.2 GB/month each when quiet, more with many errors and logs |
+| Grows with your app's traffic? | No (at most 25 functions tracked per deployment, the rest grouped) | Yes: every error and log line is saved, up to 20K errors and 100K log lines a day |
+
+| Backend plan | Rough fit |
+|---|---|
+| Free (about 1M calls, 1 GB database bandwidth a month) | 1–2 deployments. Database bandwidth runs out before calls do |
+| Pro (about 25M calls, 50 GB a month) | Dozens of deployments, busy ones included |
+
+Check [convex.dev/pricing](https://www.convex.dev/pricing) for current plan limits, and **Settings → Monitoring Backend → Backend Usage** in the app for what your backend actually uses.
+
+**You can change all of this:**
+- **Turn off instant errors** on a deployment with lots of errors or logs. It goes back to the 5-minute checks, which cost the same however busy the app is.
+- **Turn off monitoring** on deployments you don't need, such as old dev deployments.
+- **Store less:** lower `MAX_LOG_LINES_PER_DAY`, `MAX_ERRORS_PER_DAY` or `LOG_RETENTION_HOURS` (see the [precautions checklist](#precautions-checklist)).
+- **Set a usage limit** on the backend so it can never go past a budget (precaution 2).
+
+### Instant (log stream)
 
 ```mermaid
 flowchart LR
@@ -125,13 +168,20 @@ flowchart LR
     Cron -.-> Logs
 ```
 
-1. **Enable monitoring** creates a webhook log stream on your deployment, pointed at `https://<backend>.convex.site/logs/<deployment>`. The backend saves that stream's signing secret and checks every batch with HMAC-SHA256. It rejects batches that are more than 10 minutes old.
+1. The app creates a webhook log stream on your deployment, pointed at `https://<backend>.convex.site/logs/<deployment>`. The backend saves that stream's signing secret and checks every batch with HMAC-SHA256. It rejects batches that are more than 10 minutes old.
 2. **Raw function calls are never stored.** Each batch is folded into counters: per function per minute, hour and day, plus deployment-wide totals per minute and hour. A busy app adds rows per *function per minute*, not per call.
 3. **Logs and errors are stored as text**, up to a daily quota per deployment. Past the quota, they still count in the stats and still trigger alerts. Only the text is dropped until midnight UTC.
 4. **The app's queries read only those counters**, and every read has a cap. The Overview reads about 24 rows per deployment, whatever your traffic.
 5. **An hourly cleanup job** deletes data past its retention period, in batches.
 
-Convex allows one webhook stream per deployment. Don't enable monitoring on the backend's own deployment, or it would ingest its own logs.
+Convex allows one webhook stream per deployment. If yours already sends logs somewhere else (Axiom, Datadog…), monitoring uses the 5-minute checks. Don't enable monitoring on the backend's own deployment, or it would ingest its own logs.
+
+### Every 5 minutes (checks)
+
+1. The app gives your backend its access token (stored in the backend's `secrets` table, and deleted when you turn monitoring off on the last deployment).
+2. Every 5 minutes, one backend job reads each deployment's last minutes of call counts, failure rates and scheduler lag. These are the same numbers as the Health charts in the Convex dashboard. It saves them in the same counters as above, so all the screens work the same way.
+3. Each minute is counted exactly once. The backend keeps track of the last minute it saved, and after a gap it catches up on up to the last 55 minutes, which is as far back as Convex keeps them.
+4. Deployments with a working log stream are skipped, so nothing is counted twice.
 
 ### Built-in limits
 
@@ -145,7 +195,7 @@ Convex allows one webhook stream per deployment. Don't enable monitoring on the 
 
 ## Alerts & notifications
 
-Alerts need the monitoring backend, and log streams on the deployments you want to watch.
+Alerts need the monitoring backend and monitoring turned on for the deployments you want to watch. **Error rate** and **scheduler lag** work on any plan and are checked every 5 minutes. **New error**, **log match** and **deploy** need instant errors (Convex Pro), because they read the error messages and logs as they arrive.
 
 **What can alert you**
 
@@ -197,9 +247,9 @@ Do these once after deploying the backend.
 - Use the `openssl rand -hex 32` command above (64 characters). Never use a short or reused password.
 - To rotate it, run `npx convex env set APP_KEY "$(openssl rand -hex 32)" --prod`, then reconnect in the app. This takes effect immediately and doesn't need a redeploy.
 
-**2. Set a usage limit on the backend itself.** Every event your apps send runs a function on the backend, so a traffic spike on a monitored app becomes usage on the backend.
+**2. Set a usage limit on the backend itself.** With instant errors, every batch of events your apps send runs functions on the backend, so a traffic spike on a monitored app becomes usage on the backend. The 5-minute checks cost the same however busy your apps are.
 - In the app, go to **Settings → Monitoring Backend → Backend Usage → Usage Limits**. Add a *warning* limit on Function Calls, and optionally a *disable* limit as a hard stop.
-- If a disable limit trips, your monitored apps keep running, but monitoring stops. Convex marks each log stream as failed when the backend stops answering. After you re-enable the backend, tap **Repair** on each monitored deployment.
+- If a disable limit trips, your monitored apps keep running, but monitoring stops. Convex marks each log stream as failed when the backend stops answering. After you re-enable the backend, tap **Repair** on each monitored deployment, or **Use 5-Minute Checks Instead**.
 
 **3. Choose how long to keep data.** These are optional environment variables, set with `npx convex env set NAME value --prod`. Changes apply within the hour, with no redeploy.
 
@@ -212,9 +262,11 @@ Do these once after deploying the backend.
 
 Keeping less data is cheaper and exposes less if your key leaks. Logs often contain user data, so keep them only as long as you need them.
 
-**4. Keep secrets out of logs.** The backend stores whatever your apps pass to `console.log`. Don't log tokens, passwords or personal data in the apps you monitor.
+**4. Keep secrets out of logs.** With instant errors, the backend stores whatever your apps pass to `console.log`. Don't log tokens, passwords or personal data in the apps you monitor.
 
-**5. Upgrading from an older backend?** Run this once after `npx convex deploy`, so existing stats appear in the new charts:
+**5. Know that the backend holds your access token.** The 5-minute checks need the app's access token on the backend, so treat the backend's dashboard access like the token itself. It's deleted when you turn off monitoring on the last deployment. If you revoke the token, monitoring shows **Reconnect**.
+
+**6. Upgrading from an older backend?** Run this once after `npx convex deploy`, so existing stats appear in the new charts:
 
 ```bash
 npx convex run rollups:rebuild --prod
@@ -222,7 +274,7 @@ npx convex run rollups:rebuild --prod
 
 It runs in the background and is safe to run again.
 
-**6. Check for write conflicts if you have heavy traffic.** Batches for the same deployment update the same counter rows. Convex retries conflicting writes automatically, but you can confirm with `npx convex insights --prod`. In the app, the same information is under deployment → Health → Insights.
+**7. Check for write conflicts if you have heavy traffic.** Batches for the same deployment update the same counter rows. Convex retries conflicting writes automatically, but you can confirm with `npx convex insights --prod`. In the app, the same information is under deployment → Health → Insights.
 
 ## Ask AI
 
@@ -281,7 +333,7 @@ npx convex env set AI_MODEL anthropic/claude-sonnet-5 --prod
 ```
 ConvexDashboard/   SwiftUI app (Views, ViewModels, Models, Services, Theme)
 ConvexWidgets/     WidgetKit extension
-backend/           Convex backend: log ingest, stats, alerts, Ask AI
+backend/           Convex backend: monitoring (log ingest + 5-minute checks), stats, alerts, Ask AI
 Config/            Signing settings (your values go in Local.xcconfig)
 design/            App icon source (swift design/make_icon.swift <output.png>)
 project.yml        XcodeGen spec — the .xcodeproj is generated from it
@@ -293,7 +345,8 @@ Working on the backend with an AI coding tool? Read `backend/convex/_generated/a
 
 ## Caveats
 
-- **Undocumented endpoints:** the metrics charts, Insights and the data browser use the same private endpoints as the official Convex dashboard, so they could break.
+- **Undocumented endpoints:** the metrics charts, Insights, the data browser, Live Logs and the 5-minute checks use the same private endpoints as the official Convex dashboard and CLI, so they could break.
+- **Live Logs shows recent calls only:** Convex keeps about the last 1,000 calls in memory. For history, turn on instant errors.
 - **No deploys from the phone:** pushing code needs the Convex CLI.
 - **Background alerts are best effort:** iOS decides when background refresh runs.
 

@@ -3,8 +3,11 @@ import SwiftUI
 
 struct FunctionDetailView: View {
     @State private var viewModel: FunctionDetailViewModel
+    /// False on 5-minute checks (no log stream): counts only, no latency, usage or error messages.
+    private let hasDetails: Bool
 
-    init(stat: FunctionStat, window: StatWindow, deploymentName: String, source: any MonitoringSource) {
+    init(stat: FunctionStat, window: StatWindow, deploymentName: String, source: any MonitoringSource, hasDetails: Bool = true) {
+        self.hasDetails = hasDetails
         _viewModel = State(initialValue: FunctionDetailViewModel(
             stat: stat, window: window, deploymentName: deploymentName, source: source
         ))
@@ -35,46 +38,26 @@ struct FunctionDetailView: View {
                     StatTile(title: "Calls", value: MetricFormat.count(stat.calls))
                     StatTile(title: "Error Rate", value: MetricFormat.percent(stat.errorRate),
                              tint: stat.errors > 0 ? .convexRed : nil)
-                    StatTile(title: "p95", value: MetricFormat.duration(stat.p95Ms))
+                    if hasDetails {
+                        StatTile(title: "p95", value: MetricFormat.duration(stat.p95Ms))
+                    }
                 }
                 if !viewModel.timeseries.isEmpty {
                     CallsChart(points: viewModel.timeseries)
                         .frame(height: 140)
-                    LatencyChart(points: viewModel.timeseries)
-                        .frame(height: 120)
-                }
-            }
-
-            ConvexSection("Performance") {
-                LabeledContent("Average", value: MetricFormat.duration(stat.avgMs))
-                LabeledContent("p95", value: MetricFormat.duration(stat.p95Ms))
-                LabeledContent("Max", value: MetricFormat.duration(stat.maxMs))
-                if stat.type == "query" {
-                    LabeledContent("Cached", value: stat.calls > 0
-                        ? MetricFormat.percent(Double(stat.cachedCalls) / Double(stat.calls)) : "–")
-                }
-            }
-
-            ConvexSection("Database") {
-                LabeledContent("Documents Read", value: MetricFormat.count(stat.docsRead))
-                LabeledContent("Documents Written", value: MetricFormat.count(stat.docsWritten))
-                LabeledContent("Bytes Read", value: MetricFormat.bytes(stat.dbReadBytes))
-                LabeledContent("Bytes Written", value: MetricFormat.bytes(stat.dbWriteBytes))
-                LabeledContent("Egress", value: MetricFormat.bytes(stat.egressBytes))
-            }
-
-            ConvexSection("Recent Errors") {
-                if viewModel.errors.isEmpty {
-                    Text("No recent errors.")
-                        .foregroundStyle(Color.convexSecondaryText)
-                }
-                ForEach(viewModel.errors) { error in
-                    NavigationLink {
-                        ErrorDetailView(error: error)
-                    } label: {
-                        ErrorRow(error: error, showPath: false)
+                    if hasDetails {
+                        LatencyChart(points: viewModel.timeseries)
+                            .frame(height: 120)
                     }
                 }
+            } footer: {
+                if !hasDetails {
+                    Text("Counts only, updated every 5 minutes. Turn on instant errors on the deployment screen (Convex Pro) for latency, database usage and error details.")
+                }
+            }
+
+            if hasDetails {
+                details
             }
         }
         .convexScreenBackground()
@@ -90,6 +73,41 @@ struct FunctionDetailView: View {
         }
         .refreshable { await viewModel.load() }
         .task(id: viewModel.window) { await viewModel.autoRefresh() }
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        ConvexSection("Performance") {
+            LabeledContent("Average", value: MetricFormat.duration(stat.avgMs))
+            LabeledContent("p95", value: MetricFormat.duration(stat.p95Ms))
+            LabeledContent("Max", value: MetricFormat.duration(stat.maxMs))
+            if stat.type == "query" {
+                LabeledContent("Cached", value: stat.calls > 0
+                    ? MetricFormat.percent(Double(stat.cachedCalls) / Double(stat.calls)) : "–")
+            }
+        }
+
+        ConvexSection("Database") {
+            LabeledContent("Documents Read", value: MetricFormat.count(stat.docsRead))
+            LabeledContent("Documents Written", value: MetricFormat.count(stat.docsWritten))
+            LabeledContent("Bytes Read", value: MetricFormat.bytes(stat.dbReadBytes))
+            LabeledContent("Bytes Written", value: MetricFormat.bytes(stat.dbWriteBytes))
+            LabeledContent("Egress", value: MetricFormat.bytes(stat.egressBytes))
+        }
+
+        ConvexSection("Recent Errors") {
+            if viewModel.errors.isEmpty {
+                Text("No recent errors.")
+                    .foregroundStyle(Color.convexSecondaryText)
+            }
+            ForEach(viewModel.errors) { error in
+                NavigationLink {
+                    ErrorDetailView(error: error)
+                } label: {
+                    ErrorRow(error: error, showPath: false)
+                }
+            }
+        }
     }
 }
 

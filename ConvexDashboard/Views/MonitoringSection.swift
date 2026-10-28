@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// "Enable monitoring" switch for one deployment.
+/// Monitoring for one deployment: one toggle; instant errors on Convex Pro, 5-minute checks otherwise.
 struct MonitoringSection: View {
     @Environment(PulseSettings.self) private var pulseSettings
     @State private var viewModel: MonitoringViewModel
     @State private var isConfirmingEnable = false
+    @State private var isConfirmingInstant = false
+    @State private var isConfirmingStopInstant = false
     @State private var isConfirmingDisable = false
     @State private var isShowingSettings = false
     private let deploymentName: String
@@ -25,28 +27,46 @@ struct MonitoringSection: View {
         } header: {
             Eyebrow("Monitoring")
         } footer: {
-            Text("Streams function calls, errors, and logs to your monitoring backend. Requires Convex Pro on this deployment.")
+            Text(footer)
         }
         // Re-check whenever the backend connection changes.
         .task(id: pulseSettings.client?.deploymentURL) {
             await viewModel.refresh(pulse: pulseSettings.client)
         }
         .confirmationDialog("Enable monitoring?", isPresented: $isConfirmingEnable, titleVisibility: .visible) {
-            Button("Enable") {
-                guard let pulse = pulseSettings.client else { return }
-                Task { await viewModel.enable(pulse: pulse) }
-            }
+            Button("Enable") { run { await viewModel.enable(pulse: $0) } }
         } message: {
-            Text("This creates a webhook log stream on this deployment that sends every function call, error, and console log to your monitoring backend.")
+            Text("Your monitoring backend tracks this deployment's calls and errors and sends alerts. On Convex Pro, errors arrive instantly through a log stream; on other plans, counts update every 5 minutes.")
+        }
+        .confirmationDialog("Turn on instant errors?", isPresented: $isConfirmingInstant, titleVisibility: .visible) {
+            Button("Turn On") { run { await viewModel.addInstantErrors(pulse: $0) } }
+        } message: {
+            Text("Adds a log stream that sends every call, error and console log to your backend as it happens: error messages, latency, and new-error, log and deploy alerts. Needs Convex Pro. Backend usage grows with this app's traffic.")
+        }
+        .confirmationDialog("Turn off instant errors?", isPresented: $isConfirmingStopInstant, titleVisibility: .visible) {
+            Button("Turn Off Instant Errors") { run { await viewModel.removeInstantErrors(pulse: $0) } }
+        } message: {
+            Text("Removes the log stream to save backend usage. Calls and errors keep updating every 5 minutes. Collected data is kept.")
         }
         .confirmationDialog("Turn off monitoring?", isPresented: $isConfirmingDisable, titleVisibility: .visible) {
             Button("Turn Off", role: .destructive) { disable(deleteData: false) }
             Button("Turn Off and Delete Data", role: .destructive) { disable(deleteData: true) }
         } message: {
-            Text("The log stream will be removed from this deployment.")
+            Text("Your backend stops collecting data for this deployment.")
         }
         .sheet(isPresented: $isShowingSettings) {
             MonitoringSettingsView()
+        }
+    }
+
+    private var footer: String {
+        switch viewModel.status {
+        case .lite:
+            "Calls and errors update every 5 minutes. Instant errors need Convex Pro. Live Logs (above) shows calls as they happen."
+        case .on, .streamFailed:
+            "Instant: errors, logs and latency arrive as they happen."
+        default:
+            "Tracks calls and errors and sends alerts: instantly on Convex Pro, every 5 minutes on other plans."
         }
     }
 
@@ -60,9 +80,9 @@ struct MonitoringSection: View {
         case .isMonitoringBackend:
             Label("This is your monitoring backend.", systemImage: "info.circle")
                 .foregroundStyle(Color.convexSecondaryText)
-        case .off, .on:
+        case .off, .lite, .on:
             Toggle(isOn: Binding(
-                get: { viewModel.status == .on },
+                get: { viewModel.status.isEnabled },
                 set: { isOn in
                     if isOn { isConfirmingEnable = true } else { isConfirmingDisable = true }
                 }
@@ -77,22 +97,25 @@ struct MonitoringSection: View {
             }
             .disabled(viewModel.isWorking)
 
-            if viewModel.status == .on, let pulse = pulseSettings.client {
-                NavigationLink {
-                    FunctionsView(deploymentName: deploymentName, source: pulse)
-                } label: {
-                    Label("Function Health", systemImage: "waveform.path.ecg")
+            if case .lite(let error?) = viewModel.status {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(Color.convexYellow)
+                    Button("Reconnect") { run { await viewModel.reconnect(pulse: $0) } }
+                        .disabled(viewModel.isWorking)
                 }
-                NavigationLink {
-                    RecentErrorsView(deploymentName: deploymentName, source: pulse)
-                } label: {
-                    Label("Recent Errors", systemImage: "exclamationmark.octagon")
-                }
-                NavigationLink {
-                    LogsView(deploymentName: deploymentName, source: pulse)
-                } label: {
-                    Label("Live Logs", systemImage: "text.alignleft")
-                }
+                .padding(.vertical, 2)
+            }
+            if viewModel.status.isEnabled {
+                links
+            }
+            if case .lite = viewModel.status {
+                instantErrorsOption
+            }
+            if viewModel.status == .on {
+                Button("Turn Off Instant Errors…") { isConfirmingStopInstant = true }
+                    .disabled(viewModel.isWorking)
             }
         case .streamFailed(let reason):
             VStack(alignment: .leading, spacing: 6) {
@@ -103,8 +126,7 @@ struct MonitoringSection: View {
                     .foregroundStyle(Color.convexSecondaryText)
                     .textSelection(.enabled)
                 Button {
-                    guard let pulse = pulseSettings.client else { return }
-                    Task { await viewModel.repair(pulse: pulse) }
+                    run { await viewModel.repair(pulse: $0) }
                 } label: {
                     HStack {
                         Text("Repair")
@@ -117,20 +139,10 @@ struct MonitoringSection: View {
                 .disabled(viewModel.isWorking)
             }
             .padding(.vertical, 2)
+            Button("Use 5-Minute Checks Instead") { run { await viewModel.removeInstantErrors(pulse: $0) } }
+                .disabled(viewModel.isWorking)
             Button("Turn Off Monitoring", role: .destructive) { isConfirmingDisable = true }
                 .disabled(viewModel.isWorking)
-        case .otherWebhookExists(let url):
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Another webhook log stream is already configured.", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(Color.convexYellow)
-                Text("Convex allows one webhook stream per deployment. Remove it in the Convex dashboard to use monitoring here.")
-                    .font(.caption)
-                    .foregroundStyle(Color.convexSecondaryText)
-                Text(url)
-                    .font(.convexMono(.caption2))
-                    .foregroundStyle(Color.convexSecondaryText)
-                    .textSelection(.enabled)
-            }
         case .failed(let message):
             VStack(alignment: .leading, spacing: 6) {
                 Label(message, systemImage: "exclamationmark.triangle")
@@ -143,8 +155,65 @@ struct MonitoringSection: View {
         }
     }
 
-    private func disable(deleteData: Bool) {
+    @ViewBuilder
+    private var links: some View {
+        if let pulse = pulseSettings.client {
+            let isFull = viewModel.status == .on
+            NavigationLink {
+                FunctionsView(deploymentName: deploymentName, source: pulse, hasDetails: isFull)
+            } label: {
+                Label("Function Health", systemImage: "waveform.path.ecg")
+            }
+            // Live Logs (straight from Convex) is under Health for every deployment.
+            if isFull {
+                NavigationLink {
+                    RecentErrorsView(deploymentName: deploymentName, source: pulse)
+                } label: {
+                    Label("Saved Errors", systemImage: "exclamationmark.octagon")
+                }
+                NavigationLink {
+                    LogsView(deploymentName: deploymentName, source: pulse)
+                } label: {
+                    Label("Saved Logs", systemImage: "text.alignleft")
+                }
+            }
+        }
+    }
+
+    /// 5-minute checks → instant errors. Convex allows one webhook stream per deployment.
+    @ViewBuilder
+    private var instantErrorsOption: some View {
+        if let url = viewModel.otherWebhookURL {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Instant errors need this deployment's webhook log stream, which already points elsewhere:")
+                    .font(.caption)
+                    .foregroundStyle(Color.convexSecondaryText)
+                Text(url)
+                    .font(.convexMono(.caption2))
+                    .foregroundStyle(Color.convexSecondaryText)
+                    .textSelection(.enabled)
+            }
+        } else {
+            if let reason = viewModel.instantErrorsUnavailable {
+                Text("Instant errors unavailable: \(reason)")
+                    .font(.caption)
+                    .foregroundStyle(Color.convexSecondaryText)
+            }
+            Button {
+                isConfirmingInstant = true
+            } label: {
+                Label("Turn On Instant Errors…", systemImage: "bolt")
+            }
+            .disabled(viewModel.isWorking)
+        }
+    }
+
+    private func run(_ action: @escaping @MainActor (PulseClient) async -> Void) {
         guard let pulse = pulseSettings.client else { return }
-        Task { await viewModel.disable(pulse: pulse, deleteData: deleteData) }
+        Task { await action(pulse) }
+    }
+
+    private func disable(deleteData: Bool) {
+        run { await viewModel.disable(pulse: $0, deleteData: deleteData) }
     }
 }

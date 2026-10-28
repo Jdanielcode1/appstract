@@ -176,6 +176,8 @@ struct MonitoredDeployment: Decodable, Identifiable, Hashable, Sendable {
     let name: String
     let projectName: String?
     let deploymentType: String?
+    /// "lite" (counts pulled every 5 minutes) or "full" (log stream). Nil from older backends.
+    let mode: String?
 
     var id: String { name }
     var label: String {

@@ -52,6 +52,16 @@ export const unregister = mutation({
       .withIndex("by_deployment", (q) => q.eq("deploymentName", deploymentName))
       .unique();
     if (existing) await ctx.db.delete(existing._id);
+    // Lite takes over from now; the stream already reported the minutes before.
+    const lite = await ctx.db
+      .query("liteTargets")
+      .withIndex("by_deployment", (q) => q.eq("deploymentName", deploymentName))
+      .unique();
+    if (lite && !deleteData) {
+      await ctx.db.patch(lite._id, { polledThrough: Math.floor(Date.now() / 60_000) * 60_000 });
+    } else if (lite) {
+      await ctx.db.delete(lite._id);
+    }
     if (deleteData) {
       await ctx.scheduler.runAfter(0, internal.streams.deleteDeploymentData, { deploymentName });
     }
@@ -83,6 +93,10 @@ export const deleteDeploymentData = internalMutation({
       ctx.db
         .query("functionStats")
         .withIndex("by_deployment_bucket", (q) => q.eq("deploymentName", deploymentName))
+        .take(DELETE_BATCH),
+      ctx.db
+        .query("deploymentStats")
+        .withIndex("by_deploymentName_granularity_bucketStart", (q) => q.eq("deploymentName", deploymentName))
         .take(DELETE_BATCH),
       ctx.db
         .query("errors")

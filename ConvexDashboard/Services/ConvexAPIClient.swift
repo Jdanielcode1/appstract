@@ -39,6 +39,9 @@ struct ConvexAPIClient: Sendable {
         self.session = session
     }
 
+    /// Handed only to the user's own monitoring backend, which polls metrics with it (Lite monitoring).
+    var tokenForMonitoringBackend: String { token }
+
     // MARK: Management API (Authorization: Bearer)
 
     func tokenDetails() async throws -> TokenDetails {
@@ -187,6 +190,21 @@ struct ConvexAPIClient: Sendable {
 
     func deleteLogStream(deploymentURL: URL, id: String) async throws {
         let _: EmptyResponse = try await deploymentPost(deploymentURL, "delete_log_stream/\(id)", body: EmptyBody())
+    }
+
+    /// Recent function executions after `cursor` (ms; 0 = everything Convex still holds). See
+    /// `FunctionLogsPage`. Long-polls: Convex holds the request until something newer runs, so a
+    /// timeout just means "nothing new" and returns an empty page.
+    func functionLogs(deploymentURL: URL, cursor: Double) async throws -> FunctionLogsPage {
+        var url = deploymentURL.appending(path: "api/stream_function_logs")
+        url.append(queryItems: [URLQueryItem(name: "cursor", value: String(cursor))])
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        do {
+            return try await send(request, authorization: "Convex \(token)")
+        } catch APIError.transport(let error as URLError) where error.code == .timedOut {
+            return FunctionLogsPage(entries: [], newCursor: cursor)
+        }
     }
 
     // MARK: App metrics (undocumented; the Convex dashboard's Health charts)

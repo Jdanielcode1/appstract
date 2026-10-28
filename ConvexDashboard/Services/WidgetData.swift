@@ -21,6 +21,8 @@ struct DeploymentSnapshot: Sendable {
     let limitFraction: Double?
     let limitName: String?
     let lastDeploy: Date?
+    /// Function calls over time; nil when neither source answered.
+    let callsChart: WidgetCallsChart?
 
     var isPaused: Bool { state.map { $0 != "running" } ?? false }
     var title: String { projectName ?? name }
@@ -28,8 +30,39 @@ struct DeploymentSnapshot: Sendable {
     static let sample = DeploymentSnapshot(
         name: "happy-otter-123", projectName: "my-app", deploymentType: "prod", state: "running",
         callsToday: 12_400, callsMonth: 310_000, errors24h: 3, calls24h: 14_100,
-        limitFraction: 0.42, limitName: "Function Calls", lastDeploy: .now.addingTimeInterval(-7_200)
+        limitFraction: 0.42, limitName: "Function Calls", lastDeploy: .now.addingTimeInterval(-7_200),
+        callsChart: .sample
     )
+}
+
+/// Function calls per bucket for the widget chart: hourly for 24h from the monitoring backend, or
+/// 5-minute buckets for the last hour from Convex's own metrics (which only keep about an hour).
+struct WidgetCallsChart: Sendable {
+    struct Bar: Identifiable, Sendable {
+        let start: Date
+        let calls: Double
+        /// Only the monitoring backend counts errors.
+        let errors: Double?
+        var id: Date { start }
+    }
+
+    enum Span: Sendable {
+        case day, hour
+    }
+
+    let bars: [Bar]
+    let span: Span
+
+    var label: String { span == .day ? "Calls · 24h" : "Calls · last hour" }
+    var total: Double { bars.reduce(0) { $0 + $1.calls } }
+
+    static let sample: WidgetCallsChart = {
+        let hour = Date.now.addingTimeInterval(-23 * 3600)
+        let shape: [Double] = [3, 2, 2, 1, 1, 2, 4, 7, 10, 12, 14, 13, 15, 16, 14, 12, 13, 15, 17, 14, 11, 9, 7, 6]
+        return WidgetCallsChart(bars: shape.enumerated().map { index, value in
+            Bar(start: hour.addingTimeInterval(Double(index) * 3600), calls: value * 40, errors: index == 13 ? 30 : 0)
+        }, span: .day)
+    }()
 }
 
 enum WidgetRefresher {
@@ -148,6 +181,7 @@ struct WidgetDataSource: Sendable {
         async let limits: UsageLimitsResponse? = try? deploymentGet(url, "list_usage_limits")
         async let stateResult = try? deploymentState(url)
         async let healthResult = try? health(name: name)
+        async let chartResult = callsChart(name: name, url: url)
 
         let usageValue = await usage
         let calls = usageValue?.metrics["functionCalls"]?.usage
@@ -165,7 +199,8 @@ struct WidgetDataSource: Sendable {
             calls24h: healthValue?.calls,
             limitFraction: pressure?.fraction,
             limitName: pressure.map { UsageMetric.displayName($0.metric) },
-            lastDeploy: deployment.lastDeployTime?.dateFromMillis
+            lastDeploy: deployment.lastDeployTime?.dateFromMillis,
+            callsChart: await chartResult
         )
     }
 
@@ -194,6 +229,54 @@ struct WidgetDataSource: Sendable {
         guard let pulse else { return nil }
         let rows: [Health] = try await convexFunction(pulse.url, path: "dashboard:overview", args: ["appKey": pulse.appKey], authorization: nil)
         return rows.first { $0.deploymentName == name }
+    }
+
+    private struct TimeseriesRow: Decodable {
+        let bucketStart: Double
+        let calls: Double
+        let errors: Double
+    }
+
+    /// 24 hourly bars when the deployment is monitored and had calls, otherwise the last hour.
+    private func callsChart(name: String, url: URL) async -> WidgetCallsChart? {
+        if let day = try? await hourlyCalls(name: name), day.total > 0 { return day }
+        return try? await lastHourCalls(url)
+    }
+
+    private func hourlyCalls(name: String) async throws -> WidgetCallsChart? {
+        guard let pulse else { return nil }
+        let rows: [TimeseriesRow] = try await convexFunction(
+            pulse.url, path: "dashboard:timeseries",
+            args: ["appKey": pulse.appKey, "deploymentName": name, "window": "24h"], authorization: nil
+        )
+        // The backend only has rows for hours with traffic; fill the gaps with zero.
+        let byStart = Dictionary(rows.map { ($0.bucketStart, $0) }, uniquingKeysWith: { first, _ in first })
+        let hourMs = 3_600_000.0
+        let currentHour = (Date.now.timeIntervalSince1970 * 1000 / hourMs).rounded(.down) * hourMs
+        let bars = (0..<24).map { index in
+            let start = currentHour - Double(23 - index) * hourMs
+            let row = byStart[start]
+            return WidgetCallsChart.Bar(start: Date(timeIntervalSince1970: start / 1000), calls: row?.calls ?? 0, errors: row?.errors ?? 0)
+        }
+        return WidgetCallsChart(bars: bars, span: .day)
+    }
+
+    /// `function_call_count_top_k` in 5-minute buckets; the top functions plus `_rest` add up to all calls.
+    private func lastHourCalls(_ base: URL) async throws -> WidgetCallsChart? {
+        let now = Date.now
+        let window = MetricsWindow(start: now.addingTimeInterval(-3600), end: now, buckets: 12)
+        var url = base.appending(path: "api/app_metrics/function_call_count_top_k")
+        url.append(queryItems: [URLQueryItem(name: "window", value: window.queryValue), URLQueryItem(name: "k", value: "10")])
+        let entries: [TopKEntry] = try await send(URLRequest(url: url), authorization: "Convex \(token)")
+        guard let longest = entries.max(by: { $0.buckets.count < $1.buckets.count }), !longest.buckets.isEmpty else { return nil }
+        let bars = longest.buckets.indices.map { index in
+            WidgetCallsChart.Bar(
+                start: longest.buckets[index].date,
+                calls: entries.reduce(0) { $0 + (index < $1.buckets.count ? $1.buckets[index].value ?? 0 : 0) },
+                errors: nil
+            )
+        }
+        return WidgetCallsChart(bars: bars, span: .hour)
     }
 
     private func deploymentState(_ url: URL) async throws -> String {

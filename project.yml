@@ -58,6 +58,7 @@ targets:
     sources:
       - path: ConvexWidgets
       - path: ConvexDashboard/Services/WidgetData.swift
+      - path: ConvexDashboard/Models/AppMetricsModels.swift
       - path: ConvexDashboard/Services/KeychainStore.swift
       - path: ConvexDashboard/Models/Models.swift
       - path: ConvexDashboard/Theme/Theme.swift
